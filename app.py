@@ -1,40 +1,61 @@
-# app.py
 import time
-import json
 import requests
 import streamlit as st
 
-# ---------- Config ----------
-MODEL_ID = "hugps/mh-bert"  # your HF model repo
+MODEL_ID = "hugps/mh-bert"
 API_URL  = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
-HF_TOKEN = st.secrets.get("HF_TOKEN")  # optional but recommended
+HF_TOKEN = st.secrets.get("HF_TOKEN")
 HEADERS  = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
 
-# ---------- Inference helper ----------
 def classify_remote(text: str):
     """
-    Call Hugging Face Inference API directly.
-    Handles cold start (503) and returns a flat list of {label, score}.
+    Call HF Inference API with:
+      - server-side warmup (wait_for_model)
+      - exponential backoff on 503/timeouts
+      - generous read timeout for cold starts
+    Returns list of {label, score}.
     """
     payload = {
         "inputs": text,
         "parameters": {"return_all_scores": True},
-        "options": {"wait_for_model": True},  # warm the model if sleeping
+        "options": {"wait_for_model": True}  # ask HF to load the model if sleeping
     }
 
-    for _ in range(2):  # retry once if cold
-        r = requests.post(API_URL, headers=HEADERS, json=payload, timeout=60)
-        if r.status_code == 503:
-            time.sleep(5)
-            continue
-        r.raise_for_status()
-        data = r.json()
-        # Normalize shape: [[{label, score}, ...]] -> [{...}, ...]
-        if isinstance(data, list) and data and isinstance(data[0], list):
-            data = data[0]
-        return [{"label": d["label"], "score": float(d["score"])} for d in data]
+    max_tries = 5
+    base_sleep = 4  # seconds
 
-    raise RuntimeError("Model still loading. Please try again.")
+    for i in range(max_tries):
+        try:
+            # give plenty of time for first response after cold start
+            r = requests.post(API_URL, headers=HEADERS, json=payload, timeout=180)
+            if r.status_code == 503:
+                # model is loading; back off and retry
+                wait = base_sleep * (i + 1)
+                st.info(f"Model is warming up (503). Retrying in {wait}s…")
+                time.sleep(wait)
+                continue
+
+            r.raise_for_status()
+            data = r.json()
+            if isinstance(data, list) and data and isinstance(data[0], list):
+                data = data[0]
+            return [{"label": d["label"], "score": float(d["score"])} for d in data]
+
+        except requests.exceptions.ReadTimeout:
+            wait = base_sleep * (i + 1)
+            st.info(f"Inference timed out. Retrying in {wait}s…")
+            time.sleep(wait)
+        except requests.exceptions.RequestException as e:
+            # Any other network error: brief backoff, then retry
+            wait = base_sleep * (i + 1)
+            st.info(f"Network error: {e}. Retrying in {wait}s…")
+            time.sleep(wait)
+
+    # If we’re here, all tries failed
+    raise RuntimeError(
+        "Inference did not complete in time. Please try again in a moment "
+        "(the model may still be loading on the server)."
+    )
 
 def friendly_scores(raw):
     mapping = {"LABEL_0": "Non-issue", "LABEL_1": "Potential MH sign"}
