@@ -69,10 +69,6 @@ st.set_page_config(page_title="MH Detector", page_icon="🧠")
 st.title("🧠 Mental Health Early Signs Detector")
 st.caption("Demo — not medical advice.")
 
-status, preview, is_json = ping_model(MODEL_ID)
-st.caption(f"Ping https://api-inference.huggingface.co/models/{MODEL_ID} → {status}")
-st.code(preview + ("..." if len(preview) == 400 else ""), language="json" if is_json else "text")
-
 text = st.text_area("Enter text", height=140, placeholder="Type or paste text…")
 thr  = st.slider("Alert threshold (class 1)", 0.50, 0.90, 0.65, 0.01)
 
