@@ -10,15 +10,15 @@ st.caption("Educational demo — not medical advice.")
 # -----------------------------
 @st.cache_resource
 def load_model():
-    user_model_id = "hugps/mh-bert"  # ⚠️ replace with your real model if you have it
-    fallback_model_id = "distilbert-base-uncased-finetuned-sst-2-english"
+    from transformers import pipeline
+    model_id = "hugps/mh-bert"  # replace with your fine-tuned model if available
+    fallback_model = "distilbert-base-uncased-finetuned-sst-2-english"
 
     try:
-        return pipeline("text-classification", model=user_model_id)
+        return pipeline("text-classification", model=model_id, return_all_scores=True)
     except Exception:
-        # Instead of showing the long traceback, just switch quietly
-        st.info(f"Using fallback model: {fallback_model_id}")
-        return pipeline("text-classification", model=fallback_model_id)
+        st.info(f"Using fallback model: {fallback_model}")
+        return pipeline("text-classification", model=fallback_model, return_all_scores=True)
 
 clf = load_model()
 
@@ -34,16 +34,12 @@ if st.button("Analyze"):
         st.warning("Please enter a longer text.")
     else:
         with st.spinner("Analyzing..."):
-            out = clf(t)[0]
-            raw_label, score = out["label"], out["score"]
-
-            # Initialize p1 (probability of early sign)
-            if raw_label in ["LABEL_1", "POSITIVE"]:
-                p1 = score
-            elif raw_label in ["LABEL_0", "NEGATIVE"]:
-                p1 = 1 - score
-            else:
-                p1 = 0.0  # fallback
+            results = clf(t)[0]  # returns list of all labels with scores
+            # Normalize label names (handles both custom and sentiment models)
+            p1 = 0.0
+            for r in results:
+                if r["label"] in ["LABEL_1", "POSITIVE"]:
+                    p1 = r["score"]
 
             # Decision
             if p1 >= thr:
@@ -53,7 +49,7 @@ if st.button("Analyze"):
                 st.success(f"✅ Non-issue — p1={p1:.2f}, thr={thr:.2f}")
 
         with st.expander("Details"):
-            st.json(out)
+            st.json(results)
 
 # -----------------------------
 # Examples
