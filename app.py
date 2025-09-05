@@ -1,107 +1,66 @@
-# app.py — Streamlit + Hugging Face Inference API (no TF/torch)
-
-import time
-import json
-import requests
+import time, json, requests
 import streamlit as st
+from huggingface_hub import InferenceClient
 
-# ======== CONFIG ========
-# TEMP quick-test model to prove everything works:
-# MODEL_ID = "distilbert-base-uncased-finetuned-sst-2-english"
+# --- Config from secrets ---
+MODEL_ID = st.secrets.get("MODEL_ID", "hugps/mh-bert-pt")
+HF_TOKEN = st.secrets.get("HF_TOKEN")  # optional for public, recommended
 
-# When you’re ready to use your model, set:
-MODEL_ID = "hugps/mh-bert-pt"   # or "hugps/mh-bert-pt" after conversion (see Step 6)
+# --- Inference client (no TF/torch needed on Streamlit) ---
+client = InferenceClient(model=MODEL_ID, token=HF_TOKEN)
 
-API_URL  = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
-
-# Put your token in Streamlit Secrets (Manage app → Settings → Secrets)
-HF_TOKEN = st.secrets.get("HF_TOKEN", None)
-HEADERS  = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
-
-# ======== HELPERS ========
+@st.cache_data(ttl=3600, show_spinner=False)
 def ping_model(model_id: str):
-    """Show whether the model repo is reachable (helps debug 404/401)."""
-    url = f"https://huggingface.co/api/models/{model_id}"
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=30)
-        st.caption(f"Ping /api/models/{model_id} → {r.status_code}")
-        if r.text:
-            st.code(r.text[:300], language="json")
-    except Exception as e:
-        st.caption(f"Ping failed: {e}")
+    url = f"https://api-inference.huggingface.co/models/{model_id}"
+    r = requests.get(url, timeout=30, headers=({"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}))
+    return r.status_code, r.json()
 
-def classify_remote(text: str):
-    """
-    Call HF Inference API directly.
-    - Ask server to warm the model (wait_for_model).
-    - Handle cold starts/timeouts with retries.
-    Returns: list of {label, score}.
-    """
-    payload = {
-        "inputs": text,
-        "parameters": {"return_all_scores": True},
-        "options": {"wait_for_model": True}
-    }
+def classify(text: str, tries: int = 5, timeout: int = 120):
+    """Call HF Inference API, retrying on warm-up/timeouts."""
+    payload = {"inputs": text, "parameters": {"return_all_scores": True}, "options": {"wait_for_model": True}}
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
+    url = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
 
-    max_tries = 6
-    base_sleep = 4  # seconds
-
-    for i in range(max_tries):
+    for i in range(tries):
         try:
-            r = requests.post(API_URL, headers=HEADERS, json=payload, timeout=240)
-            if r.status_code == 503:
-                wait = base_sleep * (i + 1)
-                st.info(f"Model is warming up (503). Retrying in {wait}s…")
-                time.sleep(wait)
+            r = requests.post(url, json=payload, headers=headers, timeout=timeout)
+            if r.status_code == 503:  # loading
+                time.sleep(3 * (i + 1))
                 continue
-
             if r.status_code == 404:
-                raise RuntimeError(
-                    f"Model not found at {MODEL_ID}. "
-                    f"Open https://huggingface.co/{MODEL_ID} to confirm the path."
-                )
-
+                raise RuntimeError(f"Model not found at {MODEL_ID}. Check the repo path.")
             r.raise_for_status()
             data = r.json()
-            # Normalize shape: [[{label, score}, ...]] -> [{...}, ...]
+            # normalize shape: [[{label,score},...]] -> [{label,score},...]
             if isinstance(data, list) and data and isinstance(data[0], list):
                 data = data[0]
-            return [{"label": d["label"], "score": float(d["score"])} for d in data]
-
-        except requests.exceptions.ReadTimeout:
-            wait = base_sleep * (i + 1)
-            st.info(f"Inference timed out. Retrying in {wait}s…")
-            time.sleep(wait)
+            return data
+        except requests.exceptions.Timeout:
+            time.sleep(3 * (i + 1))
         except requests.exceptions.RequestException as e:
-            wait = base_sleep * (i + 1)
-            st.info(f"Network error: {e}. Retrying in {wait}s…")
-            time.sleep(wait)
+            time.sleep(3 * (i + 1))
+    raise RuntimeError("Inference did not complete in time. Please try again.")
 
-    raise RuntimeError("Inference did not complete in time. Please try again shortly.")
+def friendly(scores):
+    # map labels if your config uses generic LABEL_0/LABEL_1
+    out = {}
+    for d in scores:
+        lab = d.get("label", "")
+        pretty = {"LABEL_0": "Non-issue", "LABEL_1": "Potential MH sign"}.get(lab, lab)
+        out[pretty] = float(d.get("score", 0.0))
+    return out
 
-def friendly_scores(raw):
-    mapping = {"LABEL_0": "Non-issue", "LABEL_1": "Potential MH sign"}
-    return {mapping.get(d["label"], d["label"]): d["score"] for d in raw}
-
-# (Optional) warmup once at startup
-@st.cache_resource
-def _warmup():
-    try:
-        _ = classify_remote("hello")
-    except Exception:
-        pass
-    return True
-
-# ======== UI ========
-st.set_page_config(page_title="MH Early Signs Detector", page_icon="🧠", layout="centered")
+# --- UI ---
+st.set_page_config(page_title="MH Detector", page_icon="🧠")
 st.title("🧠 Mental Health Early Signs Detector")
-st.caption("Educational demo — not medical advice.")
+st.caption("Demo — not medical advice.")
 
-# Show a quick ping so you can see 200 / 404, etc.
-ping_model(MODEL_ID)
+status, meta = ping_model(MODEL_ID)
+st.caption(f"Ping /api/models/{MODEL_ID} → {status}")
+st.code(json.dumps(meta)[:400] + "...", language="json")
 
-text = st.text_area("Enter text", height=160, placeholder="Type or paste text…")
-thr  = st.slider("Alert threshold (class 1)", 0.50, 0.90, value=0.65, step=0.01)
+text = st.text_area("Enter text", height=140, placeholder="Type or paste text…")
+thr  = st.slider("Alert threshold (class 1)", 0.50, 0.90, 0.65, 0.01)
 
 if st.button("Analyze"):
     t = (text or "").strip()
@@ -109,19 +68,14 @@ if st.button("Analyze"):
         st.warning("Please enter a longer text.")
     else:
         try:
-            _ = _warmup()
-            raw = classify_remote(t)
-            scores = friendly_scores(raw)
-            p1 = float(scores.get("Potential MH sign", 0.0))
+            raw = classify(t)
+            scores = friendly(raw)
+            p1 = scores.get("Potential MH sign", 0.0)
             label = "Potential MH sign" if p1 >= thr else "Non-issue"
-
-            st.write("### Result")
             if label == "Potential MH sign":
                 st.error(f"⚠️ {label} — p1={p1:.2f}, thr={thr:.2f}")
-                st.info("If this is about you, consider reaching out to someone you trust or a professional. ❤️")
             else:
                 st.success(f"✅ {label} — p1={p1:.2f}, thr={thr:.2f}")
-
             with st.expander("Details"):
                 st.json(raw)
         except Exception as e:
@@ -133,7 +87,7 @@ if st.button("Try examples"):
         "I had a relaxing day at the park with my family.",
         "Lately I feel empty and it’s hard to get out of bed."
     ]:
-        raw = classify_remote(s)
-        scores = friendly_scores(raw)
-        p1 = float(scores.get("Potential MH sign", 0.0))
+        raw = classify(s)
+        scores = friendly(raw)
+        p1 = scores.get("Potential MH sign", 0.0)
         st.write(f"**p1={p1:.2f}** — _{s}_")
