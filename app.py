@@ -35,7 +35,7 @@ if st.button("Analyze"):
         with st.spinner("Analyzing..."):
             results = clf(t)[0]
 
-            # Extract p1 (score for POSITIVE or LABEL_1)
+            # Force p1 = score of POSITIVE or LABEL_1
             p1 = 0.0
             for r in results:
                 if r["label"] in ["LABEL_1", "POSITIVE"]:
