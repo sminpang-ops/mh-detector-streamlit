@@ -35,15 +35,18 @@ if st.button("Analyze"):
         with st.spinner("Analyzing..."):
             results = clf(t)[0]
 
-            # Force p1 = score of POSITIVE or LABEL_1
-            p1 = 0.0
+            # Take the score of the label that indicates "with issue"
+            # Here we flip: NEGATIVE -> p1 (issue), POSITIVE -> p0 (non-issue)
+            p1, p0 = 0.0, 0.0
             for r in results:
-                if r["label"] in ["LABEL_1", "POSITIVE"]:
+                if r["label"] in ["NEGATIVE", "LABEL_1"]:
                     p1 = r["score"]
+                elif r["label"] in ["POSITIVE", "LABEL_0"]:
+                    p0 = r["score"]
 
             # Decision
             if p1 >= thr:
-                st.error(f"⚠️ Potential MH sign — p1={p1:.2f}, thr={thr:.2f}")
+                st.error(f"⚠️ With issue — p1={p1:.2f}, thr={thr:.2f}")
                 st.info("If this is about you, consider reaching out to someone you trust or a professional. ❤️")
             else:
                 st.success(f"✅ Non-issue — p1={p1:.2f}, thr={thr:.2f}")
