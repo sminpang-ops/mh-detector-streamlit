@@ -1,25 +1,23 @@
 import streamlit as st
 from transformers import pipeline
 
-# -----------------------------
-# Page Setup
-# -----------------------------
 st.set_page_config(page_title="MH Early Signs Detector", page_icon="🧠", layout="centered")
 st.title("🧠 Mental Health Early Signs Detector")
 st.caption("Educational demo — not medical advice.")
 
 # -----------------------------
-# Load Model Once (with fallback)
+# Load Model Once (with silent fallback)
 # -----------------------------
 @st.cache_resource
 def load_model():
-    user_model_id = "hugps/mh-bert"  # ⚠️ Replace with your actual model ID if it exists
+    user_model_id = "hugps/mh-bert"  # ⚠️ replace with your real model if you have it
     fallback_model_id = "distilbert-base-uncased-finetuned-sst-2-english"
 
     try:
         return pipeline("text-classification", model=user_model_id)
-    except Exception as e:
-        st.warning(f"Could not load model '{user_model_id}'. Falling back to public model. Error: {e}")
+    except Exception:
+        # Instead of showing the long traceback, just switch quietly
+        st.info(f"Using fallback model: {fallback_model_id}")
         return pipeline("text-classification", model=fallback_model_id)
 
 clf = load_model()
@@ -39,7 +37,6 @@ if st.button("Analyze"):
             out = clf(t)[0]
             label, score = out["label"], out["score"]
 
-            # Map labels
             mapping = {"LABEL_0": "Non-issue", "LABEL_1": "Potential MH sign"}
             friendly = mapping.get(label, label)
 
