@@ -6,18 +6,17 @@ st.title("🧠 Mental Health Early Signs Detector")
 st.caption("Educational demo — not medical advice.")
 
 # -----------------------------
-# Load Model Once (with silent fallback)
+# Load Model Once
 # -----------------------------
 @st.cache_resource
 def load_model():
-    from transformers import pipeline
     model_id = "hugps/mh-bert"  # replace with your fine-tuned model if available
     fallback_model = "distilbert-base-uncased-finetuned-sst-2-english"
 
     try:
         return pipeline("text-classification", model=model_id, return_all_scores=True)
     except Exception:
-        st.info(f"Using fallback model: {fallback_model}")
+        # silent fallback (no message shown)
         return pipeline("text-classification", model=fallback_model, return_all_scores=True)
 
 clf = load_model()
@@ -34,8 +33,9 @@ if st.button("Analyze"):
         st.warning("Please enter a longer text.")
     else:
         with st.spinner("Analyzing..."):
-            results = clf(t)[0]  # returns list of all labels with scores
-            # Normalize label names (handles both custom and sentiment models)
+            results = clf(t)[0]
+
+            # Extract p1 (score for POSITIVE or LABEL_1)
             p1 = 0.0
             for r in results:
                 if r["label"] in ["LABEL_1", "POSITIVE"]:
@@ -61,8 +61,10 @@ if st.button("Try examples"):
         "Lately I feel empty and it’s hard to get out of bed."
     ]
     for s in examples:
-        out = clf(s)[0]
-        label, score = out["label"], out["score"]
-        mapping = {"LABEL_0": "Non-issue", "LABEL_1": "Potential MH sign"}
-        friendly = mapping.get(label, label)
-        st.write(f"**{friendly} ({score:.2f})** — {s}")
+        results = clf(s)[0]
+        p1 = 0.0
+        for r in results:
+            if r["label"] in ["LABEL_1", "POSITIVE"]:
+                p1 = r["score"]
+        label = "Potential MH sign" if p1 >= thr else "Non-issue"
+        st.write(f"**{label} (p1={p1:.2f})** — {s}")
