@@ -10,7 +10,7 @@ import streamlit as st
 # MODEL_ID = "distilbert-base-uncased-finetuned-sst-2-english"
 
 # When you’re ready to use your model, set:
-MODEL_ID = "hugps/mh-bert"   # or "hugps/mh-bert-pt" after conversion (see Step 6)
+MODEL_ID = "hugps/mh-bert-pt"   # or "hugps/mh-bert-pt" after conversion (see Step 6)
 
 API_URL  = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
 
