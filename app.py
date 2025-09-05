@@ -37,13 +37,13 @@ if st.button("Analyze"):
             out = clf(t)[0]
             raw_label, score = out["label"], out["score"]
 
-            # Normalize label names to your mapping
+            # Initialize p1 (probability of early sign)
             if raw_label in ["LABEL_1", "POSITIVE"]:
-                friendly = "Potential MH sign"
                 p1 = score
+            elif raw_label in ["LABEL_0", "NEGATIVE"]:
+                p1 = 1 - score
             else:
-                friendly = "Non-issue"
-                p1 = 1 - score if raw_label in ["NEGATIVE", "LABEL_0"] else score
+                p1 = 0.0  # fallback
 
             # Decision
             if p1 >= thr:
