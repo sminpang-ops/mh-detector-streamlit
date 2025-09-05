@@ -1,37 +1,51 @@
-import time, json, requests
+import requests
 import streamlit as st
-from huggingface_hub import InferenceClient
+import json
+import time
 
-# --- Config from secrets ---
 MODEL_ID = st.secrets.get("MODEL_ID", "hugps/mh-bert-pt")
-HF_TOKEN = st.secrets.get("HF_TOKEN")  # optional for public, recommended
+HF_TOKEN = st.secrets.get("HF_TOKEN")
+HEADERS  = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
 
-# --- Inference client (no TF/torch needed on Streamlit) ---
-client = InferenceClient(model=MODEL_ID, token=HF_TOKEN)
-
+# ---- Safer ping (handles non-JSON responses) ----
 @st.cache_data(ttl=3600, show_spinner=False)
 def ping_model(model_id: str):
     url = f"https://api-inference.huggingface.co/models/{model_id}"
-    r = requests.get(url, timeout=30, headers=({"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}))
-    return r.status_code, r.json()
+    r = requests.get(url, headers=HEADERS, timeout=30)
+    status = r.status_code
+    # Try JSON; if it fails, fall back to text
+    try:
+        body = r.json()
+        body_preview = json.dumps(body)[:400]
+        is_json = True
+    except Exception:
+        body_preview = (r.text or "").strip()[:400]
+        is_json = False
+    return status, body_preview, is_json
 
+# ---- Robust inference with retries & safe JSON parse ----
 def classify(text: str, tries: int = 5, timeout: int = 120):
-    """Call HF Inference API, retrying on warm-up/timeouts."""
-    payload = {"inputs": text, "parameters": {"return_all_scores": True}, "options": {"wait_for_model": True}}
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
     url = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
-
+    payload = {
+        "inputs": text,
+        "parameters": {"return_all_scores": True},
+        "options": {"wait_for_model": True}
+    }
     for i in range(tries):
         try:
-            r = requests.post(url, json=payload, headers=headers, timeout=timeout)
-            if r.status_code == 503:  # loading
+            r = requests.post(url, headers=HEADERS, json=payload, timeout=timeout)
+            if r.status_code == 503:              # model is loading
                 time.sleep(3 * (i + 1))
                 continue
             if r.status_code == 404:
                 raise RuntimeError(f"Model not found at {MODEL_ID}. Check the repo path.")
             r.raise_for_status()
-            data = r.json()
-            # normalize shape: [[{label,score},...]] -> [{label,score},...]
+            try:
+                data = r.json()
+            except Exception:
+                # Show a snippet to help debugging if non-JSON comes back
+                raise RuntimeError(f"Inference returned non-JSON: {(r.text or '')[:200]}")
+            # Normalize shape: [[{label,score},...]] -> [{label,score},...]
             if isinstance(data, list) and data and isinstance(data[0], list):
                 data = data[0]
             return data
@@ -55,9 +69,9 @@ st.set_page_config(page_title="MH Detector", page_icon="🧠")
 st.title("🧠 Mental Health Early Signs Detector")
 st.caption("Demo — not medical advice.")
 
-status, meta = ping_model(MODEL_ID)
-st.caption(f"Ping /api/models/{MODEL_ID} → {status}")
-st.code(json.dumps(meta)[:400] + "...", language="json")
+status, preview, is_json = ping_model(MODEL_ID)
+st.caption(f"Ping https://api-inference.huggingface.co/models/{MODEL_ID} → {status}")
+st.code(preview + ("..." if len(preview) == 400 else ""), language="json" if is_json else "text")
 
 text = st.text_area("Enter text", height=140, placeholder="Type or paste text…")
 thr  = st.slider("Alert threshold (class 1)", 0.50, 0.90, 0.65, 0.01)
