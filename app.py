@@ -1,154 +1,223 @@
-# app.py
-# -------------------------------
-# Streamlit demo for mental-health early sign detection
-# via Hugging Face Inference API (no local TF/PyTorch).
-# -------------------------------
-
-import time
+import os
 import json
+import time
+from typing import Any, Dict, List, Tuple
+
 import requests
 import streamlit as st
 
-# ---------- Settings (read from Streamlit Secrets if available) ----------
-MODEL_ID = st.secrets.get("MODEL_ID", "hugps/mh-bert-pt")  # try your PyTorch repo first
-HF_TOKEN = st.secrets.get("HF_TOKEN", "")                  # optional but recommended
-HEADERS  = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
+# -----------------------------
+# Page & Theme
+# -----------------------------
+st.set_page_config(
+    page_title="Mental Health Early Signs Detector",
+    page_icon="🧠",
+    layout="centered",
+)
 
-# ---------- Helpers ----------
-@st.cache_data(ttl=1800, show_spinner=False)
-def wait_until_ready(model_id: str, max_wait_s: int = 240) -> bool:
-    """
-    Poll /models/{id} until the model is loaded or max_wait_s elapses.
-    Returns True if the model looks ready (HTTP 200 and not 'loading').
-    """
-    url = f"https://api-inference.huggingface.co/models/{model_id}"
-    t0 = time.time()
-    while time.time() - t0 < max_wait_s:
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=20)
-            if r.status_code == 200:
-                # When loading, the body often contains {"state":"loading"}
-                try:
-                    info = r.json()
-                    state = (info.get("state") or "").lower()
-                except Exception:
-                    state = ""
-                if state != "loading":
-                    return True
-        except requests.RequestException:
-            pass
-        time.sleep(3)
-    return False
-
-
-def classify(text: str, tries: int = 8, timeout: int = 180):
-    """
-    Call the Inference API with retries & generous timeouts.
-    Returns a list of {label, score} dicts (top-level list).
-    """
-    url = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
-    payload = {
-        "inputs": text,
-        "parameters": {"return_all_scores": True},
-        "options": {"wait_for_model": True, "use_cache": True},
-    }
-
-    for i in range(tries):
-        try:
-            r = requests.post(url, headers=HEADERS, json=payload, timeout=timeout)
-            if r.status_code == 503:
-                # model is still loading; backoff and retry
-                time.sleep(4 * (i + 1))
-                continue
-            if r.status_code == 404:
-                raise RuntimeError(
-                    f"Model not found at {MODEL_ID}. Check the repo path and visibility."
-                )
-            r.raise_for_status()
-
-            try:
-                data = r.json()
-            except Exception:
-                snippet = (r.text or "")[:200]
-                raise RuntimeError(f"Inference returned non-JSON: {snippet}")
-
-            # API may return [[{...},{...}]] or [{...},{...}]
-            if isinstance(data, list) and data and isinstance(data[0], list):
-                data = data[0]
-            return data
-
-        except requests.exceptions.Timeout:
-            time.sleep(4 * (i + 1))
-        except requests.exceptions.RequestException:
-            time.sleep(4 * (i + 1))
-
-    raise RuntimeError("Inference did not complete in time. Please try again later.")
-
-
-def friendly(scores):
-    """
-    Map generic LABEL_0/1 to human-friendly names.
-    """
-    out = {}
-    for d in scores:
-        lab = d.get("label", "")
-        pretty = {"LABEL_0": "Non-issue", "LABEL_1": "Potential MH sign"}.get(lab, lab)
-        out[pretty] = float(d.get("score", 0.0))
-    # Ensure keys exist
-    out.setdefault("Non-issue", 0.0)
-    out.setdefault("Potential MH sign", 0.0)
-    return out
-
-
-# ---------- UI ----------
-st.set_page_config(page_title="Mental Health Early Signs Detector", page_icon="🧠")
 st.title("🧠 Mental Health Early Signs Detector")
 st.caption("Demo — not medical advice.")
 
-# Warm up the model once per session
-with st.spinner("Warming up model (first call can take up to a minute)…"):
-    _ready = wait_until_ready(MODEL_ID, max_wait_s=240)
+# -----------------------------
+# Secrets / Env
+# -----------------------------
+# Preferred: put these in .streamlit/secrets.toml
+MODEL_ID = st.secrets.get("MODEL_ID", os.environ.get("MODEL_ID", "hugps/mh-bert"))
+HF_TOKEN = st.secrets.get("HF_TOKEN", os.environ.get("HF_TOKEN", ""))
 
-text = st.text_area(
-    "Enter text",
-    height=140,
-    placeholder="Type or paste text… (e.g., “Lately I feel empty and it’s hard to get out of bed.”)"
-)
-thr = st.slider("Alert threshold (class 1)", 0.50, 0.90, 0.65, 0.01)
+INFERENCE_URL = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
 
-if st.button("Analyze"):
-    t = (text or "").strip()
-    if len(t) < 3:
-        st.warning("Please enter a longer text.")
+HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
+
+# -----------------------------
+# Utilities
+# -----------------------------
+@st.cache_data(ttl=60 * 60, show_spinner=False)
+def ping_model(url: str) -> Tuple[int, str]:
+    """
+    Ping the Hugging Face Inference Endpoint (or model repo) to warm it up.
+    Returns (status_code, preview_text)
+    """
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        status = r.status_code
+        # Try to parse JSON for a short preview
+        try:
+            body = r.json()
+            preview = json.dumps(body)[:400]
+        except Exception:
+            preview = (r.text or "")[:400]
+        return status, preview
+    except requests.exceptions.RequestException as e:
+        return 0, f"Ping error: {e}"
+
+
+def _extract_label_and_score(pred: Any) -> Tuple[str, float]:
+    """
+    Robustly extract (label, score) from HF inference response.
+    Supports common formats:
+      - [{"label": "LABEL_0", "score": 0.98}]
+      - {"labels": ["POSITIVE", "NEGATIVE"], "scores": [0.8, 0.2]}
+      - [[{"label": ..., "score": ...}]] for batch
+    """
+    if isinstance(pred, list):
+        # batch or single
+        first = pred[0]
+        if isinstance(first, dict) and "label" in first and "score" in first:
+            return first["label"], float(first["score"])
+        if isinstance(first, list) and len(first) > 0 and isinstance(first[0], dict):
+            d = first[0]
+            return d.get("label", "LABEL_0"), float(d.get("score", 0.0))
+
+    if isinstance(pred, dict):
+        labels = pred.get("labels")
+        scores = pred.get("scores")
+        if labels and scores and len(labels) == len(scores) and len(labels) > 0:
+            # take top-1
+            idx = int(max(range(len(scores)), key=lambda i: scores[i]))
+            return str(labels[idx]), float(scores[idx])
+
+    # Fallback
+    return "UNKNOWN", 0.0
+
+
+def call_hf_inference(text: str, timeout: int = 60) -> Dict[str, Any]:
+    """
+    Call Hugging Face Inference API with robust error handling.
+    """
+    payload = {"inputs": text}
+    try:
+        r = requests.post(
+            INFERENCE_URL,
+            headers=HEADERS,
+            json=payload,
+            timeout=timeout,
+        )
+    except requests.exceptions.Timeout:
+        return {"ok": False, "error": "Request to Hugging Face timed out."}
+    except requests.exceptions.RequestException as e:
+        return {"ok": False, "error": f"Network error: {e}"}
+
+    if r.status_code == 503:
+        # Model is loading on HF side
+        return {"ok": False, "error": "Model is loading on Hugging Face (503). Try again shortly."}
+
+    if r.status_code != 200:
+        # Attach short body for debugging
+        short_body = r.text[:400]
+        return {"ok": False, "error": f"HF API error {r.status_code}: {short_body}"}
+
+    try:
+        pred = r.json()
+    except Exception:
+        return {"ok": False, "error": "Non-JSON response from HF API."}
+
+    label, score = _extract_label_and_score(pred)
+    return {"ok": True, "label": label, "score": score, "raw": pred}
+
+
+# Optional: local pipeline fallback (CPU). Useful when HF API is slow or private.
+# We import lazily so users without transformers don't crash import-time.
+@st.cache_resource(show_spinner=False)
+def get_local_pipeline():
+    """
+    Lazy-load a local transformers pipeline, only if the user switches to 'Local CPU' backend.
+    """
+    try:
+        from transformers import pipeline
+
+        # If your fine-tuned model is available locally/by name, use MODEL_ID,
+        # otherwise fall back to a sentiment model for demo.
+        model_choice = MODEL_ID if MODEL_ID else "distilbert-base-uncased-finetuned-sst-2-english"
+        return pipeline("text-classification", model=model_choice)
+    except Exception as e:
+        return f"Local pipeline failed to load: {e}"
+
+
+def classify_local(pipe, text: str) -> Dict[str, Any]:
+    try:
+        out = pipe(text, truncation=True)
+        # Most pipelines return a list of {label, score}
+        if isinstance(out, list) and out:
+            d = out[0]
+            return {"ok": True, "label": d.get("label", "UNKNOWN"), "score": float(d.get("score", 0.0)), "raw": out}
+        return {"ok": False, "error": f"Unexpected local output: {out}"}
+    except Exception as e:
+        return {"ok": False, "error": f"Local inference error: {e}"}
+
+
+# -----------------------------
+# Sidebar Controls
+# -----------------------------
+with st.sidebar:
+    st.subheader("⚙️ Inference Settings")
+    backend = st.radio("Backend", ["Hugging Face API", "Local CPU (transformers)"], index=0, help="Use your fine-tuned model on HF or a local CPU pipeline.")
+    st.write("**Model ID**:", MODEL_ID or "—")
+
+    if backend == "Hugging Face API":
+        status, preview = ping_model(INFERENCE_URL)
+        if status == 0:
+            st.info("Could not ping HF endpoint (network issue or wrong URL).")
+        elif status == 200:
+            st.success("HF endpoint reachable ✅")
+        else:
+            st.warning(f"HF ping status: {status}")
+        with st.expander("Ping preview (debug)"):
+            st.code(preview or "—", language="json")
+
     else:
-        try:
-            raw = classify(t)
-            scores = friendly(raw)
-            p1 = scores["Potential MH sign"]
-            label = "Potential MH sign" if p1 >= thr else "Non-issue"
+        st.caption("Local pipeline loads on first use and may download model weights.")
 
-            if label == "Potential MH sign":
-                st.error(f"⚠️ {label} — p1={p1:.2f} (threshold={thr:.2f})")
+# -----------------------------
+# Main UI
+# -----------------------------
+EXAMPLES = [
+    "Lately I can't sleep and I feel empty most of the time.",
+    "I had a good day today and enjoyed a long walk with friends.",
+    "Sometimes I think about giving up, but I'm trying to stay hopeful.",
+]
+
+st.write("Enter a short post, comment, or sentence:")
+text = st.text_area("Input text", value=EXAMPLES[0], height=140, label_visibility="collapsed")
+
+colA, colB = st.columns([1, 1])
+with colA:
+    if st.button("🔍 Analyze", use_container_width=True):
+        if not text.strip():
+            st.warning("Please enter some text.")
+        else:
+            if backend == "Hugging Face API":
+                with st.spinner("Warming up / calling Hugging Face…"):
+                    result = call_hf_inference(text.strip(), timeout=60)
             else:
-                st.success(f"✅ {label} — p1={p1:.2f} (threshold={thr:.2f})")
+                with st.spinner("Loading local pipeline (first run may take a while)…"):
+                    pipe = get_local_pipeline()
+                    if isinstance(pipe, str):
+                        result = {"ok": False, "error": pipe}
+                    else:
+                        result = classify_local(pipe, text.strip())
 
-            with st.expander("See raw scores"):
-                st.json(raw)
-        except Exception as e:
-            st.error(f"API error: {e}")
+            if result.get("ok"):
+                st.success("Done ✅")
+                label = result.get("label", "UNKNOWN")
+                score = result.get("score", 0.0)
 
-st.write("---")
-if st.button("Try examples"):
-    examples = [
-        "I had a relaxing day at the park with my family.",
-        "Lately I feel empty and it’s hard to get out of bed.",
-    ]
-    for s in examples:
-        try:
-            raw = classify(s)
-            scores = friendly(raw)
-            p1 = scores["Potential MH sign"]
-            label = "Potential MH sign" if p1 >= thr else "Non-issue"
-            st.write(f"**{label}** — p1={p1:.2f} — _{s}_")
-        except Exception as e:
-            st.write(f"Error on example: {e}")
+                st.markdown(f"**Prediction:** `{label}`")
+                st.markdown(f"**Confidence:** `{score:.3f}`")
+
+                with st.expander("See raw model output"):
+                    st.code(json.dumps(result.get("raw"), indent=2)[:2000], language="json")
+            else:
+                st.error(result.get("error", "Unknown error"))
+
+with colB:
+    st.write("Examples")
+    for eg in EXAMPLES:
+        if st.button(f"Use: {eg[:40]}…", key=f"ex_{hash(eg)}", use_container_width=True):
+            st.session_state["text"] = eg  # just for UX; not strictly necessary
+            st.experimental_rerun()
+
+st.divider()
+st.caption(
+    "This tool is a research demo and not a diagnostic device. If you or someone you know is struggling, please seek professional help."
+)
