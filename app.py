@@ -16,6 +16,7 @@ def load_model():
     try:
         return pipeline("text-classification", model=model_id, return_all_scores=True)
     except Exception:
+        # silent fallback (no message shown)
         return pipeline("text-classification", model=fallback_model, return_all_scores=True)
 
 clf = load_model()
@@ -34,19 +35,18 @@ if st.button("Analyze"):
         with st.spinner("Analyzing..."):
             results = clf(t)[0]
 
-            # Initialize
+            # Take the score of the label that indicates "with issue"
+            # Here we flip: NEGATIVE -> p1 (issue), POSITIVE -> p0 (non-issue)
             p1, p0 = 0.0, 0.0
-
-            # Map labels: NEGATIVE/LABEL_1 = issue, POSITIVE/LABEL_0 = non-issue
             for r in results:
-                if r["label"] in ["POSITIVE", "LABEL_0"]:
+                if r["label"] in ["NEGATIVE", "LABEL_1"]:
                     p1 = r["score"]
-                elif r["label"] in ["NEGATIVE", "LABEL_1"]:
+                elif r["label"] in ["POSITIVE", "LABEL_0"]:
                     p0 = r["score"]
 
             # Decision
             if p1 >= thr:
-                st.error(f"⚠️ With issue (early sign) — p1={p1:.2f}, thr={thr:.2f}")
+                st.error(f"⚠️ With issue — p1={p1:.2f}, thr={thr:.2f}")
                 st.info("If this is about you, consider reaching out to someone you trust or a professional. ❤️")
             else:
                 st.success(f"✅ Non-issue — p1={p1:.2f}, thr={thr:.2f}")
@@ -61,17 +61,13 @@ st.write("---")
 if st.button("Try examples"):
     examples = [
         "I had a relaxing day at the park with my family.",
-        "I cry almost every night and I can’t focus on anything, not even things I used to enjoy.",
-        "Sometimes I feel hopeful about the future.",
         "Lately I feel empty and it’s hard to get out of bed."
     ]
     for s in examples:
         results = clf(s)[0]
-        p1, p0 = 0.0, 0.0
+        p1 = 0.0
         for r in results:
-            if r["label"] in ["NEGATIVE", "LABEL_1"]:
+            if r["label"] in ["LABEL_1", "POSITIVE"]:
                 p1 = r["score"]
-            elif r["label"] in ["POSITIVE", "LABEL_0"]:
-                p0 = r["score"]
-        label = "⚠️ With issue" if p1 >= thr else "✅ Non-issue"
+        label = "Potential MH sign" if p1 >= thr else "Non-issue"
         st.write(f"**{label} (p1={p1:.2f})** — {s}")
