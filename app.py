@@ -1,56 +1,69 @@
-import requests
-import streamlit as st
-
-MODEL_ID = "hugps/mh-bert"  # <-- update this if your repo is different
-HF_TOKEN = st.secrets.get("HF_TOKEN")
-HEADERS  = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
-
-def ping_model(model_id: str):
-    url = f"https://huggingface.co/api/models/{model_id}"
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    st.write(f"Ping /api/models/{model_id} → {r.status_code}")
-    # show some of the body so we can see “not found” or metadata
-    st.code(r.text[:400], language="json")
+# app.py — Streamlit + Hugging Face Inference API (no TF/torch)
 
 import time
+import json
 import requests
 import streamlit as st
 
-MODEL_ID = "hugps/mh-bert"
+# ======== CONFIG ========
+# TEMP quick-test model to prove everything works:
+# MODEL_ID = "distilbert-base-uncased-finetuned-sst-2-english"
+
+# When you’re ready to use your model, set:
+MODEL_ID = "hugps/mh-bert"   # or "hugps/mh-bert-pt" after conversion (see Step 6)
+
 API_URL  = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
-HF_TOKEN = st.secrets.get("HF_TOKEN")
+
+# Put your token in Streamlit Secrets (Manage app → Settings → Secrets)
+HF_TOKEN = st.secrets.get("HF_TOKEN", None)
 HEADERS  = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
+
+# ======== HELPERS ========
+def ping_model(model_id: str):
+    """Show whether the model repo is reachable (helps debug 404/401)."""
+    url = f"https://huggingface.co/api/models/{model_id}"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        st.caption(f"Ping /api/models/{model_id} → {r.status_code}")
+        if r.text:
+            st.code(r.text[:300], language="json")
+    except Exception as e:
+        st.caption(f"Ping failed: {e}")
 
 def classify_remote(text: str):
     """
-    Call HF Inference API with:
-      - server-side warmup (wait_for_model)
-      - exponential backoff on 503/timeouts
-      - generous read timeout for cold starts
-    Returns list of {label, score}.
+    Call HF Inference API directly.
+    - Ask server to warm the model (wait_for_model).
+    - Handle cold starts/timeouts with retries.
+    Returns: list of {label, score}.
     """
     payload = {
         "inputs": text,
         "parameters": {"return_all_scores": True},
-        "options": {"wait_for_model": True}  # ask HF to load the model if sleeping
+        "options": {"wait_for_model": True}
     }
 
-    max_tries = 5
+    max_tries = 6
     base_sleep = 4  # seconds
 
     for i in range(max_tries):
         try:
-            # give plenty of time for first response after cold start
-            r = requests.post(API_URL, headers=HEADERS, json=payload, timeout=180)
+            r = requests.post(API_URL, headers=HEADERS, json=payload, timeout=240)
             if r.status_code == 503:
-                # model is loading; back off and retry
                 wait = base_sleep * (i + 1)
                 st.info(f"Model is warming up (503). Retrying in {wait}s…")
                 time.sleep(wait)
                 continue
 
+            if r.status_code == 404:
+                raise RuntimeError(
+                    f"Model not found at {MODEL_ID}. "
+                    f"Open https://huggingface.co/{MODEL_ID} to confirm the path."
+                )
+
             r.raise_for_status()
             data = r.json()
+            # Normalize shape: [[{label, score}, ...]] -> [{...}, ...]
             if isinstance(data, list) and data and isinstance(data[0], list):
                 data = data[0]
             return [{"label": d["label"], "score": float(d["score"])} for d in data]
@@ -60,27 +73,33 @@ def classify_remote(text: str):
             st.info(f"Inference timed out. Retrying in {wait}s…")
             time.sleep(wait)
         except requests.exceptions.RequestException as e:
-            # Any other network error: brief backoff, then retry
             wait = base_sleep * (i + 1)
             st.info(f"Network error: {e}. Retrying in {wait}s…")
             time.sleep(wait)
 
-    # If we’re here, all tries failed
-    raise RuntimeError(
-        "Inference did not complete in time. Please try again in a moment "
-        "(the model may still be loading on the server)."
-    )
+    raise RuntimeError("Inference did not complete in time. Please try again shortly.")
 
 def friendly_scores(raw):
     mapping = {"LABEL_0": "Non-issue", "LABEL_1": "Potential MH sign"}
     return {mapping.get(d["label"], d["label"]): d["score"] for d in raw}
 
-# ---------- UI ----------
+# (Optional) warmup once at startup
+@st.cache_resource
+def _warmup():
+    try:
+        _ = classify_remote("hello")
+    except Exception:
+        pass
+    return True
+
+# ======== UI ========
 st.set_page_config(page_title="MH Early Signs Detector", page_icon="🧠", layout="centered")
 st.title("🧠 Mental Health Early Signs Detector")
 st.caption("Educational demo — not medical advice.")
 
-# MAKE SURE THESE ARE DEFINED *BEFORE* you use them:
+# Show a quick ping so you can see 200 / 404, etc.
+ping_model(MODEL_ID)
+
 text = st.text_area("Enter text", height=160, placeholder="Type or paste text…")
 thr  = st.slider("Alert threshold (class 1)", 0.50, 0.90, value=0.65, step=0.01)
 
@@ -90,6 +109,7 @@ if st.button("Analyze"):
         st.warning("Please enter a longer text.")
     else:
         try:
+            _ = _warmup()
             raw = classify_remote(t)
             scores = friendly_scores(raw)
             p1 = float(scores.get("Potential MH sign", 0.0))
@@ -106,9 +126,6 @@ if st.button("Analyze"):
                 st.json(raw)
         except Exception as e:
             st.error(f"API error: {e}")
-            # optional debug ping
-            ping = requests.get(f"https://huggingface.co/api/models/{MODEL_ID}", headers=HEADERS, timeout=30)
-            st.code(f"Ping /api/models → {ping.status_code}\n{ping.text[:400]}", language="text")
 
 st.write("---")
 if st.button("Try examples"):
