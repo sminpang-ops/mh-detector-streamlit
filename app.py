@@ -1,3 +1,17 @@
+import requests
+import streamlit as st
+
+MODEL_ID = "hugps/mh-bert"  # <-- update this if your repo is different
+HF_TOKEN = st.secrets.get("HF_TOKEN")
+HEADERS  = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
+
+def ping_model(model_id: str):
+    url = f"https://huggingface.co/api/models/{model_id}"
+    r = requests.get(url, headers=HEADERS, timeout=30)
+    st.write(f"Ping /api/models/{model_id} → {r.status_code}")
+    # show some of the body so we can see “not found” or metadata
+    st.code(r.text[:400], language="json")
+
 import time
 import requests
 import streamlit as st
