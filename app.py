@@ -34,22 +34,23 @@ if st.button("Analyze"):
         st.warning("Please enter a longer text.")
     else:
         with st.spinner("Analyzing..."):
-            # Run inference
-            out = clf(t)
-            # Find p1 score
-            p1 = None
-            for r in out:
-                if r["label"] == "LABEL_1":
-                    p1 = r["score"]
-            if p1 is None:
-                st.error("Model output did not include LABEL_1. Check your model labels.")
+            out = clf(t)[0]
+            raw_label, score = out["label"], out["score"]
+
+            # Normalize label names to your mapping
+            if raw_label in ["LABEL_1", "POSITIVE"]:
+                friendly = "Potential MH sign"
+                p1 = score
             else:
-                # Decide based on threshold
-                if p1 >= thr:
-                    st.error(f"⚠️ Potential MH sign — p1={p1:.2f}, thr={thr:.2f}")
-                    st.info("If this is about you, consider reaching out to someone you trust or a professional. ❤️")
-                else:
-                    st.success(f"✅ Non-issue — p1={p1:.2f}, thr={thr:.2f}")
+                friendly = "Non-issue"
+                p1 = 1 - score if raw_label in ["NEGATIVE", "LABEL_0"] else score
+
+            # Decision
+            if p1 >= thr:
+                st.error(f"⚠️ Potential MH sign — p1={p1:.2f}, thr={thr:.2f}")
+                st.info("If this is about you, consider reaching out to someone you trust or a professional. ❤️")
+            else:
+                st.success(f"✅ Non-issue — p1={p1:.2f}, thr={thr:.2f}")
 
         with st.expander("Details"):
             st.json(out)
