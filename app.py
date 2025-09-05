@@ -39,9 +39,9 @@ if st.button("Analyze"):
 
             # Map labels: NEGATIVE/LABEL_1 = issue, POSITIVE/LABEL_0 = non-issue
             for r in results:
-                if r["label"] in ["NEGATIVE", "LABEL_1"]:
+                if r["label"] in ["NEGATIVE", "LABEL_0"]:
                     p1 = r["score"]
-                elif r["label"] in ["POSITIVE", "LABEL_0"]:
+                elif r["label"] in ["POSITIVE", "LABEL_1"]:
                     p0 = r["score"]
 
             # Decision
