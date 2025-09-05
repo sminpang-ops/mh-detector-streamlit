@@ -3,7 +3,7 @@ import streamlit as st
 import json
 import time
 
-MODEL_ID = st.secrets.get("MODEL_ID", "hugps/mh-bert-pt")
+MODEL_ID = st.secrets.get("MODEL_ID", "hugps/mh-bert")
 HF_TOKEN = st.secrets.get("HF_TOKEN")
 HEADERS  = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
 
